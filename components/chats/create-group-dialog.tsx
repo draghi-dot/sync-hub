@@ -178,27 +178,94 @@ export function CreateGroupDialog({
       if (chatError) {
         console.error("Error creating chat:", chatError)
         console.error("Chat error details:", JSON.stringify(chatError, null, 2))
-        const errorMessage = chatError.message || "Failed to create group chat. Please check RLS policies."
-        alert(`Failed to create group chat: ${errorMessage}`)
+        const errorMessage = chatError.message || "Failed to create group chat."
+        const errorCode = (chatError as any)?.code
+        
+        // Provide helpful error message based on error code
+        if (errorCode === '42501' || errorMessage.includes('row-level security') || errorMessage.includes('RLS')) {
+          alert(
+            `Failed to create group chat: Permission denied (RLS Policy).\n\n` +
+            `Error: ${errorMessage}\n\n` +
+            `To fix this:\n` +
+            `1. Go to Supabase SQL Editor\n` +
+            `2. Run: scripts/051_fix_group_chat_creation.sql\n` +
+            `3. Try creating the group again`
+          )
+        } else {
+          alert(`Failed to create group chat: ${errorMessage}`)
+        }
         setIsCreating(false)
         return
       }
 
       // Add creator and selected members
-      const members = [
-        { chat_id: newChat.id, user_id: currentUserId },
-        ...selectedMembers.map((id) => ({ chat_id: newChat.id, user_id: id })),
-      ]
+      const allUserIds = [currentUserId, ...selectedMembers]
+      
+      // Try using the function first (if available)
+      let insertedMembers = null
+      let memberError = null
+      
+      try {
+        console.log("Attempting to use add_chat_members function...")
+        const { data: functionResult, error: functionError } = await clientSupabase
+          .rpc('add_chat_members', {
+            p_chat_id: newChat.id,
+            p_user_ids: allUserIds
+          })
+        
+        console.log("Function call result:", { functionResult, functionError })
+        
+        if (!functionError && functionResult && functionResult.length > 0) {
+          insertedMembers = functionResult
+          console.log("✅ Successfully added members via function:", insertedMembers.length)
+        } else if (functionError) {
+          // Function error - check if it's "function doesn't exist" or other error
+          console.log("Function error:", functionError)
+          if (functionError.code === '42883' || functionError.message?.includes('does not exist')) {
+            console.log("Function doesn't exist yet, will try direct insert")
+            memberError = null // Reset to try direct insert
+          } else {
+            // Other function error - might be permission issue
+            memberError = functionError
+          }
+        } else {
+          // Function returned empty - might need to try direct insert
+          console.log("Function returned empty result, trying direct insert")
+          memberError = null
+        }
+      } catch (functionErr) {
+        console.log("Function call exception:", functionErr)
+        // Continue to try direct insert
+        memberError = null
+      }
+      
+      // If function didn't work, try direct insert
+      if (!insertedMembers) {
+        console.log("Attempting direct INSERT...")
+        const members = [
+          { chat_id: newChat.id, user_id: currentUserId },
+          ...selectedMembers.map((id) => ({ chat_id: newChat.id, user_id: id })),
+        ]
 
-      const { data: insertedMembers, error: memberError } = await clientSupabase
-        .from("chat_members")
-        .insert(members)
-        .select()
+        const { data: directInsertResult, error: directInsertError } = await clientSupabase
+          .from("chat_members")
+          .insert(members)
+          .select()
+        
+        console.log("Direct insert result:", { directInsertResult, directInsertError })
+        
+        if (!directInsertError && directInsertResult) {
+          insertedMembers = directInsertResult
+          console.log("✅ Successfully added members via direct insert:", insertedMembers.length)
+        } else {
+          memberError = directInsertError
+        }
+      }
 
       if (memberError) {
         console.error("Error adding members:", memberError)
         console.error("Member error details:", JSON.stringify(memberError, null, 2))
-        console.error("Trying to add members:", members)
+        console.error("Trying to add members for chat:", newChat.id, "User IDs:", allUserIds)
         
         // Check if it's a duplicate key error (members already exist)
         if (memberError.code === '23505' || memberError.message?.includes('duplicate')) {
@@ -210,7 +277,7 @@ export function CreateGroupDialog({
           
           console.log("Existing members after error:", existingMembers)
           
-          if (existingMembers && existingMembers.length >= members.length) {
+          if (existingMembers && existingMembers.length >= allUserIds.length) {
             // Members were actually added, continue
             console.log("Members were added despite error, continuing...")
           } else {
@@ -219,7 +286,22 @@ export function CreateGroupDialog({
             return
           }
         } else {
-          alert(`Failed to add members: ${memberError.message}\n\nPlease check RLS policies.`)
+          const errorCode = (memberError as any)?.code
+          const errorMessage = memberError.message || "Failed to add members"
+          
+          if (errorCode === '42501' || errorMessage.includes('row-level security') || errorMessage.includes('RLS')) {
+          alert(
+            `Failed to add members: Permission denied (RLS Policy).\n\n` +
+            `Error: ${errorMessage}\n\n` +
+            `To fix this:\n` +
+            `1. Go to Supabase SQL Editor\n` +
+            `2. Run: scripts/057_ultimate_fix_chat_members_insert.sql\n` +
+            `3. Refresh this page and try creating the group again\n\n` +
+            `This creates a function that bypasses RLS for adding members.`
+          )
+          } else {
+            alert(`Failed to add members: ${errorMessage}\n\nPlease check RLS policies.`)
+          }
           setIsCreating(false)
           return
         }

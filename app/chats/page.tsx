@@ -71,16 +71,49 @@ export default function ChatsPage() {
         console.error("Error loading chat memberships:", membersError)
         // Try to extract error info
         const errorStr = String(membersError)
-        const errorMsg = (membersError as any)?.message || errorStr
+        const errorMsg = (membersError as any)?.message || errorStr || "Unknown error"
         const errorCode = (membersError as any)?.code
-        console.error("Error message:", errorMsg)
-        console.error("Error code:", errorCode)
+        const errorDetails = (membersError as any)?.details || ""
+        const errorHint = (membersError as any)?.hint || ""
         
-        // Only show alert for non-RLS errors to avoid spam
-        if (!errorMsg.includes("recursion") && !errorMsg.includes("row-level security")) {
-          console.warn("⚠️ Chat loading error (not showing alert to avoid spam):", errorMsg)
+        console.error("Error details:", {
+          message: errorMsg,
+          code: errorCode,
+          details: errorDetails,
+          hint: errorHint,
+          fullError: membersError
+        })
+        
+        // Check for specific error types
+        if (errorCode === '42501' || errorMsg.includes("row-level security") || errorMsg.includes("RLS")) {
+          console.warn("⚠️ RLS policy error detected.")
+          console.warn("To fix: Run scripts/053_fix_chat_members_select_error.sql in Supabase SQL Editor")
+          // Show a helpful message to the user
+          alert(
+            `Unable to load chats: Permission error.\n\n` +
+            `This is likely an RLS policy issue.\n\n` +
+            `To fix:\n` +
+            `1. Go to Supabase SQL Editor\n` +
+            `2. Run: scripts/053_fix_chat_members_select_error.sql\n` +
+            `3. Refresh this page`
+          )
+        } else if (errorMsg.includes("recursion") || errorMsg.includes("infinite")) {
+          console.warn("⚠️ Recursion error detected.")
+          console.warn("To fix: Run scripts/053_fix_chat_members_select_error.sql in Supabase SQL Editor")
+          alert(
+            `Unable to load chats: Recursion error in database policies.\n\n` +
+            `To fix:\n` +
+            `1. Go to Supabase SQL Editor\n` +
+            `2. Run: scripts/053_fix_chat_members_select_error.sql\n` +
+            `3. Refresh this page`
+          )
         } else {
-          console.warn("⚠️ RLS recursion error detected. Run scripts/042_fix_group_chat_rls.sql to fix.")
+          // For other errors, just log them
+          console.warn("⚠️ Chat loading error:", errorMsg)
+          // Only show alert for unexpected errors
+          if (errorMsg && errorMsg !== "Unknown error" && errorMsg !== "{}") {
+            console.warn("Full error object:", JSON.stringify(membersError, null, 2))
+          }
         }
         return
       }

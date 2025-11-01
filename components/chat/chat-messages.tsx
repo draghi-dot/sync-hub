@@ -119,63 +119,82 @@ export function ChatMessages({ messages: initialMessages, chatId }: ChatMessages
     }, 3000) // Poll every 3 seconds
 
     // Subscribe to new messages via Realtime (instant updates if enabled)
-    const channel = clientSupabase
-      .channel(`chat:${chatId}`, {
-        config: {
-          broadcast: { self: true },
-        },
-      })
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `chat_id=eq.${chatId}`,
-        },
-        async (payload) => {
-          console.log("✅ New message received via realtime:", payload)
-          
-          // Fetch the full message with profile data
-          const { data: newMessage, error: fetchError } = await clientSupabase
-            .from("messages")
-            .select(`
-              *,
-              profiles (
-                full_name,
-                avatar_url
-              )
-            `)
-            .eq("id", payload.new.id)
-            .single()
+    let channel: ReturnType<typeof clientSupabase.channel> | null = null
+    
+    try {
+      channel = clientSupabase
+        .channel(`chat:${chatId}`, {
+          config: {
+            broadcast: { self: true },
+          },
+        })
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "messages",
+            filter: `chat_id=eq.${chatId}`,
+          },
+          async (payload) => {
+            console.log("✅ New message received via realtime:", payload)
+            
+            try {
+              // Fetch the full message with profile data
+              const { data: newMessage, error: fetchError } = await clientSupabase
+                .from("messages")
+                .select(`
+                  *,
+                  profiles (
+                    full_name,
+                    avatar_url
+                  )
+                `)
+                .eq("id", payload.new.id)
+                .single()
 
-          console.log("Fetched new message:", newMessage, "Error:", fetchError)
+              console.log("Fetched new message:", newMessage, "Error:", fetchError)
 
-          if (newMessage) {
-            setMessages((prev) => {
-              // Check if message already exists to avoid duplicates
-              if (prev.some(m => m.id === newMessage.id)) {
-                return prev
+              if (newMessage) {
+                setMessages((prev) => {
+                  // Check if message already exists to avoid duplicates
+                  if (prev.some(m => m.id === newMessage.id)) {
+                    return prev
+                  }
+                  const updated = [...prev, newMessage as Message]
+                  // Scroll to bottom after state update
+                  setTimeout(scrollToBottom, 100)
+                  return updated
+                })
+              } else if (fetchError) {
+                console.error("Error fetching new message:", fetchError)
+                // If we can't fetch the message, try fetching all messages again
+                fetchAllMessages()
               }
-              const updated = [...prev, newMessage as Message]
-              // Scroll to bottom after state update
-              setTimeout(scrollToBottom, 100)
-              return updated
-            })
-          } else {
-            // If we can't fetch the message, try fetching all messages again
-            fetchAllMessages()
+            } catch (error) {
+              console.error("Error processing realtime message:", error)
+              fetchAllMessages()
+            }
           }
-        }
-      )
-      .subscribe((status) => {
-        console.log("Realtime subscription status:", status)
-        if (status === "SUBSCRIBED") {
-          console.log("✅ Successfully subscribed to real-time updates")
-        } else if (status === "CHANNEL_ERROR") {
-          console.warn("⚠️ Realtime subscription error - using polling fallback")
-        }
-      })
+        )
+        .subscribe((status) => {
+          console.log("Realtime subscription status:", status)
+          if (status === "SUBSCRIBED") {
+            console.log("✅ Successfully subscribed to real-time updates for chat:", chatId)
+          } else if (status === "CHANNEL_ERROR") {
+            console.warn("⚠️ Realtime subscription error - using polling fallback")
+            console.warn("This usually means:")
+            console.warn("1. Realtime is not enabled for the messages table in Supabase")
+            console.warn("2. Run scripts/048_enable_realtime_sync.sql in Supabase SQL Editor")
+          } else if (status === "TIMED_OUT") {
+            console.warn("⚠️ Realtime subscription timed out - using polling fallback")
+          } else if (status === "CLOSED") {
+            console.warn("⚠️ Realtime subscription closed")
+          }
+        })
+    } catch (error) {
+      console.error("Error setting up realtime subscription:", error)
+    }
 
     // Listen for message-sent event and add message optimistically
     const handleMessageSent = (event: CustomEvent) => {
@@ -204,7 +223,9 @@ export function ChatMessages({ messages: initialMessages, chatId }: ChatMessages
 
     return () => {
       clearInterval(pollInterval)
-      clientSupabase.removeChannel(channel)
+      if (channel) {
+        clientSupabase.removeChannel(channel)
+      }
       window.removeEventListener('message-sent', handleMessageSent as EventListener)
     }
   }, [chatId, fetchAllMessages, scrollToBottom])
